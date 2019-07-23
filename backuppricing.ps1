@@ -13,7 +13,7 @@ Param(
     [boolean]$GRS = $true,
     [Parameter(HelpMessage = 'Provide preferred currency')]
     [string]$currency = "EUR",
-    [Parameter(Mandatory = $false, HelpMessage = '[Optional Define a SPN to get access to pricelist and Azure Subscription]')]
+    [Parameter(Mandatory = $false, HelpMessage = '[Optional Define a SPN to get access to pricelist and Azure Subscription. If nothing selected, the logged in useraccount will be used]')]
     [string]$ClientID,
     [Parameter(Mandatory = $false)]
     [string]$ClientSecret   
@@ -121,7 +121,7 @@ function send-data([string]$WorkspaceId, [string]$Workspacename, $logMessage) {
         $dateTime = $dateTime.ToUniversalTime()
         Write-Verbose -Message $dateTime
     }
-    $logType = "BackupBillingReworked"
+    $logType = "NewBackupHive"
     $WorkspaceRG = (get-azurermresource | where ResourceID -like "*$workspacename*").ResourceGroupName
     $WorkspaceKey = (Get-AzureRmOperationalInsightsWorkspaceSharedKeys -ResourceGroupName $workspaceRG[0] -Name $Workspacename).PrimarySharedKey
     $body = ([System.Text.Encoding]::UTF8.GetBytes($logMessage))
@@ -164,63 +164,75 @@ $Vaults | % {
     $VMs = Get-AzureRmRecoveryServicesBackupContainer -ContainerType AzureVM
     $VMs = $VMs.FriendlyName
 
-    $VMs | % {
-        $Result = @{ }
-        # get pricing information depending on location of RSV
-        [decimal]$BareVMOnboardingRate = get-OnboardedVMprice -vaultregion $vaultregion
-        [decimal]$VMStorageRate = get-VMStoragePrice -vaultregion $vaultregion -GRS $GRS
-        # get resource group of vm
-        $RG = (Get-AzureRmResource -Name $_) | where ResourceType -eq "Microsoft.Compute/virtualMachines"
-        $RG = $RG.ResourceGroupName
+    if ($VMs) {
+        $VMs | % {
+            $Result = @{ }
+            # get pricing information depending on location of RSV
+            [decimal]$BareVMOnboardingRate = get-OnboardedVMprice -vaultregion $vaultregion
+            [decimal]$VMStorageRate = get-VMStoragePrice -vaultregion $vaultregion -GRS $GRS
+            # get resource group of vm
+            $RG = (Get-AzureRmResource -Name $_) | where ResourceType -eq "Microsoft.Compute/virtualMachines"
+            $RG = $RG.ResourceGroupName
 
 
-        # get total size of virtual machine
-        # check if vm is running
-        $VMStatus = get-vmstatus -VMname $_ -ResourceGroupName $RG
-        Write-Output "$VMStatus"
-        if ($VMstatus -eq "online") {
-            $OSDisk = (((Get-AzureRmVM -ResourceGroupName $RG -Name $_).StorageProfile).Osdisk).DiskSizeGB
-            $DataDisk = (((Get-AzureRmVM -ResourceGroupName $RG -Name $_).StorageProfile).DataDisks).DiskSizeGB
+            # get total size of virtual machine
+            # check if vm is running
+            $VMStatus = get-vmstatus -VMname $_ -ResourceGroupName $RG
+            if ($VMstatus -eq "online") {
+                $OSDisk = (((Get-AzureRmVM -ResourceGroupName $RG -Name $_).StorageProfile).Osdisk).DiskSizeGB
+                $DataDisk = (((Get-AzureRmVM -ResourceGroupName $RG -Name $_).StorageProfile).DataDisks).DiskSizeGB                
 
-            # calculate the overall size of VM
-            $OverAllDiskSize = $OSDisk + $DataDisk
+                # calculate the overall size of VM
+                $OverAllDiskSize = $OSDisk + $DataDisk
+            }
+            else {
+                $tmp = (Get-azurermdisk -resourcegroupname $RG | where ManagedBy -like "*$_*").DiskSizeGB
+                $OverAllDiskSize = 0
+                $tmp | % { $OverAllDiskSize += $_ }                   
+            }
+            # get costcenter tag
+            $CostCenter = ((get-azurermvm -ResourceGroupName $RG -Name $_).tags | where Keys -eq "CostCenter").Values
+
+            # get consumed RSV storage by VM
+            $VMConsumedStorage = get-VMConsumedStorage -VMName $_ -WorkspaceId $WorkspaceID
+
+            # check if VM is <= 50 GB or => 500 GB to get the accurate basic backup price
+            if ($OverAllDiskSize -le 50) {
+                $BareVMOnboardingRate = $BareVMOnboardingRate / 2
+            }
+            if ($OverAllDiskSize -ge 500) {
+                [double]$factor = $OverAllDiskSize / 500
+                $factor = [int][Math]::Ceiling($factor)
+                # calculate the final onboarding price
+                $BareVMOnboardingRate = $BareVMOnboardingRate * $factor
+            }
+            
+                 
+
+            # calculate pricing for RSV storage per GB
+            $VMStorageRate = ($VMStorageRate) * ($VMConsumedStorage)
+
+            # calculate the overall price for VM
+            $OverallPrice = $VMStorageRate + $BareVMOnboardingRate
+
+            $OverallPrice = [math]::Round($OverallPrice, 3)
+
+            $Result = @"
+[{  "VirtualMachine": "$_",
+    "CostCenter": $CostCenter,
+    "ConsumedStorage": $VMConsumedStorage,
+    "BackupCosts($currency)": "$OverallPrice",
+}
+"@
+
+            # create Hashtable 
+            #$Result.Add("$_", $OverallPrice)  
+            #$logMessage = ConvertTo-Json $Result
+            send-data -WorkspaceId $WorkspaceID -Workspacename $Workspacename -logMessage $Result
+
+            Write-Output "VM: $_ // Price: $OverallPrice // BarePrice: $BareVMOnboardingRate // Disksize: $OverAllDiskSize // ConsumedStorage: $VMConsumedStorage"
         }
-        else {
-            $tmp = (Get-azurermdisk -resourcegroupname $RG | where ManagedBy -like "*$_*").DiskSizeGB
-            $OverAllDiskSize = 0
-            $tmp | % { $OverAllDiskSize += $_ }           
-                    
-        }
-        # get consumed RSV storage by VM
-        $VMConsumedStorage = get-VMConsumedStorage -VMName $_ -WorkspaceId $WorkspaceID
-
-        # check if VM is <= 50 GB or => 500 GB to get the accurate basic backup price
-        if ($OverAllDiskSize -le 50) {
-            $BareVMOnboardingRate = $BareVMOnboardingRate / 2
-        }
-        if ($OverAllDiskSize -ge 500) {
-            [double]$factor = $OverAllDiskSize / 500
-            $factor = [int][Math]::Ceiling($factor)
-            # calculate the final onboarding price
-            $BareVMOnboardingRate = $BareVMOnboardingRate * $factor
-        }
-        
-        # calculate pricing for RSV storage per GB
-        $VMStorageRate = ($VMStorageRate) * ($VMConsumedStorage)
-
-        # calculate the overall price for VM
-        $OverallPrice = $VMStorageRate + $BareVMOnboardingRate
-
-        # create Hashtable 
-        $Result.Add("$_", $OverallPrice)  
-        $logMessage = ConvertTo-Json $Result
-        send-data -WorkspaceId $WorkspaceID -Workspacename $Workspacename -logMessage $logMessage
-
-        Write-Output "VM: $_ // Price: $OverallPrice // BarePrice: $BareVMOnboardingRate // Disksize: $OverAllDiskSize // ConsumedStorage: $VMConsumedStorage"
     }
     
 }
-
-
-
-
+$Result
