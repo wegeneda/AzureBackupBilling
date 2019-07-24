@@ -2,30 +2,42 @@
 [CmdletBinding()]
 Param(
     [Parameter(HelpMessage = 'Define target Subscription ID')]
-    [string]$subscriptionId = "690ad0dc-4ba7-4d77-837d-db32c3a44be7",
+    [string]$subscriptionId = "ebaa7186-4182-4b95-9c1f-0b02b314174c",
     [Parameter(HelpMessage = 'Define target Subscriptionoffer https://azure.microsoft.com/en-us/support/legal/offer-details/')]
     [string]$subscriptionOffer = "MS-AZR-0003P",
     [Parameter(HelpMessage = 'Define the Target and Source LogAnalytics Workspace name for Azure Backup Logfiles')]
-    [string]$Workspacename = "BackupLogAnalytics8772",
+    [string]$Workspacename = "backupla",
     [Parameter(HelpMessage = 'Define the Target and Source LogAnalytics Workspace ID for Azure Backup Logfiles')]
-    [string]$WorkspaceID = "9d6e2e1e-0f35-4a75-a9fe-cad6b217bd54",
+    [string]$WorkspaceID = "40019185-f7c8-4a38-a82c-841501b12432",
     [Parameter(HelpMessage = 'Define your Backupstorage sku (LRS/GRS)')]
     [boolean]$GRS = $true,
     [Parameter(HelpMessage = 'Provide preferred currency')]
     [string]$currency = "EUR",
-    [Parameter(Mandatory = $false, HelpMessage = '[Optional Define a SPN to get access to pricelist and Azure Subscription. If nothing selected, the logged in useraccount will be used]')]
-    [string]$ClientID,
+    [Parameter(Mandatory = $false, HelpMessage = '[Optional Define a SPN to get access to pricelist and Azure Subscription. If nothing selected, the MSI will be used]')]
+    [string]$ClientID="ba",
     [Parameter(Mandatory = $false)]
     [string]$ClientSecret   
 )
 
-#$rmAccount = Add-AzureRmAccount -SubscriptionId $subscriptionId | Select-AzureRmSubscription
 if (!($ClientID)) {
+    $accessParams = @{
+        ContentType = 'application/x-www-form-urlencoded'
+        Headers     = @{
+            'secret' = $ENV:MSI_SECRET
+            'accept' = 'application/json'
+        }
+        Method      = 'GET'
+        URI         = $ENV:MSI_ENDPOINT + "?resource=https://management.azure.com/&api-version=2017-09-01"
+    } 
+    $accessToken = Invoke-RestMethod @accessParams
+}
+else {
     $currentAzureContext = Get-AzureRmContext
     $azProfile = [Microsoft.Azure.Commands.Common.Authentication.Abstractions.AzureRmProfileProvider]::Instance.Profile
     $profileClient = New-Object Microsoft.Azure.Commands.ResourceManager.Common.RMProfileClient($azProfile)
     $token = $profileClient.AcquireAccessToken($currentAzureContext.Subscription.TenantId)
     $accessToken = $token.AccessToken
+    $authHeader = @{"Authorization" = "BEARER " + $accessToken } 
 }
 # getting all azure price information - this can take a while
 $authHeader = @{"Authorization" = "BEARER " + $accessToken } 
@@ -81,20 +93,34 @@ function get-VMStoragePrice ([string]$vaultregion, [boolean]$GRS) {
     return $VMStorageRate
 }
 
-function get-VMConsumedStorage([string]$VMName, [string]$WorkspaceId) {
+function get-VMConsumedStorage([string]$VMName, [string]$WorkspaceId, $subscriptionId, $authHeader, $Workspacename) {
     # get the consumed backup storage per VM
-    $query = 'AzureDiagnostics | where Category == "AzureBackupReport" | where OperationName == "StorageAssociation" | summarize arg_max(TimeGenerated, *) by BackupItemUniqueId_s, StorageUniqueId_s | extend StorageInGB = todouble(StorageConsumedInMBs_s) / 1024 | project StorageInGB, BackupItemUniqueId_s, StorageUniqueId_s | join kind=inner (AzureDiagnostics | where Category == "AzureBackupReport" | where OperationName == "Storage" | distinct StorageUniqueId_s, StorageType_s | project StorageUniqueId_s, StorageType_s) on StorageUniqueId_s | project StorageInGB, BackupItemUniqueId_s, StorageType_s | join kind=leftouter (AzureDiagnostics | where Category == "AzureBackupReport" | where OperationName == "BackupItem" | distinct BackupItemUniqueId_s, BackupItemFriendlyName_s | project BackupItemUniqueId_s, BackupItemFriendlyName_s) on BackupItemUniqueId_s | project StorageInGB, BackupItemFriendlyName_s, BackupItemUniqueId_s, StorageType_s | where StorageType_s == "Cloud" | order by StorageInGB desc'
-    $ConsumedStorageInGB = Invoke-AzureRmOperationalInsightsQuery -WorkspaceId $WorkspaceId -Query $query
-    $ConsumedStorageInGB = $ConsumedStorageInGB.Results 
-    $VMConsumedStorage = $ConsumedStorageInGB | where BackupItemFriendlyName_s -eq $VMName
-    $VMConsumedStorage = $VMConsumedStorage.StorageInGB
+    $wrkspce = " https://management.azure.com/subscriptions/$SubscriptionID/providers/Microsoft.OperationalInsights/workspaces?api-version=2015-11-01-preview"
+    $r = Invoke-WebRequest -Uri $wrkspce -Method GET -Headers $authHeader
+    $clear = $r.Content | ConvertFrom-Json
+    [string]$wrkspce = $clear.value.id | select-string ("$Workspacename")
+    [array]$arr = $wrkspce.split("/")
+    $WorkspaceRG = $arr[4]
+    $url = "https://management.azure.com/subscriptions/$SubscriptionID/resourceGroups/$WorkspaceRG/providers/Microsoft.OperationalInsights/workspaces/$workspacename/api/query?api-version=2017-01-01-preview"
+    #$query = 'AzureDiagnostics | where Category == "AzureBackupReport" | where OperationName == "StorageAssociation" | summarize arg_max(TimeGenerated, *) by BackupItemUniqueId_s, StorageUniqueId_s | extend StorageInGB = todouble(StorageConsumedInMBs_s) / 1024 | project StorageInGB, BackupItemUniqueId_s, StorageUniqueId_s | join kind=inner (AzureDiagnostics | where Category == "AzureBackupReport" | where OperationName == "Storage" | distinct StorageUniqueId_s, StorageType_s | project StorageUniqueId_s, StorageType_s) on StorageUniqueId_s | project StorageInGB, BackupItemUniqueId_s, StorageType_s | join kind=leftouter (AzureDiagnostics | where Category == "AzureBackupReport" | where OperationName == "BackupItem" | distinct BackupItemUniqueId_s, BackupItemFriendlyName_s | project BackupItemUniqueId_s, BackupItemFriendlyName_s) on BackupItemUniqueId_s | project StorageInGB, BackupItemFriendlyName_s, BackupItemUniqueId_s, StorageType_s | where StorageType_s == "Cloud" | order by StorageInGB desc' 
+    $body = @{query = 'AzureDiagnostics | where Category == "AzureBackupReport" | where OperationName == "StorageAssociation" | summarize arg_max(TimeGenerated, *) by BackupItemUniqueId_s, StorageUniqueId_s | extend StorageInGB = todouble(StorageConsumedInMBs_s) / 1024 | project StorageInGB, BackupItemUniqueId_s, StorageUniqueId_s | join kind=inner (AzureDiagnostics | where Category == "AzureBackupReport" | where OperationName == "Storage" | distinct StorageUniqueId_s, StorageType_s | project StorageUniqueId_s, StorageType_s) on StorageUniqueId_s | project StorageInGB, BackupItemUniqueId_s, StorageType_s | join kind=leftouter (AzureDiagnostics | where Category == "AzureBackupReport" | where OperationName == "BackupItem" | distinct BackupItemUniqueId_s, BackupItemFriendlyName_s | project BackupItemUniqueId_s, BackupItemFriendlyName_s) on BackupItemUniqueId_s | project StorageInGB, BackupItemFriendlyName_s, BackupItemUniqueId_s, StorageType_s | where StorageType_s == "Cloud" | order by StorageInGB desc' } | ConvertTo-Json
+    #= $query | ConvertTo-Json
+    $webresults = Invoke-WebRequest -Uri $url -Method post -Headers $authHeader -Body $body -ContentType "application/json"
+    $resultsTable = $webresults.Content | ConvertFrom-Json
+    $resultsTable.tables.rows | % {
+        [string]$str = $resultsTable.tables.rows | select-string -pattern $VMName
+        [array]$arr = $str.split("")
+    }  
+    $VMConsumedStorage = $arr[0] 
     return $VMConsumedStorage
 }
 
-function get-vmstatus([string]$VMname, [string]$ResourceGroupName) {
-    $VMStats = (Get-AzureRmVM -ResourceGroupName $ResourceGroupName -Name $VMname -Status).Statuses
-    $VMStats = ($VMStats | Where Code -Like 'PowerState/*')[0].DisplayStatus
-    if ($VMStats -eq "VM running") {
+function get-vmstatus([string]$VMname, [string]$ResourceGroupName, [string]$subscriptionId, $authHeader) {
+    $vmuri = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Compute/virtualMachines/$VMname/instanceView?api-version=2018-06-01"
+    $r = Invoke-WebRequest -Uri $vmuri -Method GET -Headers $authHeader
+    $clear = $r.Content | ConvertFrom-Json
+    $VMStats = $clear.statuses | where { ($_.code -eq "PowerState/running") -and ($_.displaystatus -eq "VM running") }
+    if ($VMStats) {
         return "online"
     }
     else {
@@ -114,16 +140,24 @@ function Build-signature ($CustomerID, $SharedKey, $Date, $ContentLength, $metho
     $authorization = 'SharedKey {0}:{1}' -f $CustomerID, $encodeHash
     return $authorization
 }
-function send-data([string]$WorkspaceId, [string]$Workspacename, $logMessage) {
+function send-data([string]$WorkspaceId, [string]$Workspacename, $logMessage, $authHeader) {
     # get workspace secret
     $dateTime = get-date
     if ($dateTime.kind.tostring() -ne 'Utc') {
         $dateTime = $dateTime.ToUniversalTime()
         Write-Verbose -Message $dateTime
     }
-    $logType = "NewBackupHive"
-    $WorkspaceRG = (get-azurermresource | where ResourceID -like "*$workspacename*").ResourceGroupName
-    $WorkspaceKey = (Get-AzureRmOperationalInsightsWorkspaceSharedKeys -ResourceGroupName $workspaceRG[0] -Name $Workspacename).PrimarySharedKey
+    $logType = "BackupBillingReworked"
+    $wrkspce = " https://management.azure.com/subscriptions/$SubscriptionID/providers/Microsoft.OperationalInsights/workspaces?api-version=2015-11-01-preview"
+    $r = Invoke-WebRequest -Uri $wrkspce -Method GET -Headers $authHeader
+    $clear = $r.Content | ConvertFrom-Json
+    [string]$wrkspce = $clear.value.id | select-string ("$Workspacename")
+    [array]$arr = $wrkspce.split("/")
+    $WorkspaceRG = $arr[4]
+    $workspacekeyurl = "https://management.azure.com/subscriptions/$subscriptionID/resourcegroups/$WorkspaceRG/providers/Microsoft.OperationalInsights/workspaces/$workspacename/sharedKeys?api-version=2015-11-01-preview"
+    $r = Invoke-WebRequest -Uri $workspacekeyurl -Method POST -Headers $authHeader
+    $clear = $r.Content | ConvertFrom-Json
+    $WorkspaceKey = $clear.primarySharedKey
     $body = ([System.Text.Encoding]::UTF8.GetBytes($logMessage))
     $method = "POST"
     $contentType = "application/json"
@@ -150,20 +184,33 @@ function send-data([string]$WorkspaceId, [string]$Workspacename, $logMessage) {
     return $response.StatusCode
 }
 
+
 # get all VM's from all RSV per subscription
-$Vaults = Get-AzureRmRecoveryServicesVault
+# get all VM's from all RSV per subscription
+$vaulturi = "https://management.azure.com/subscriptions/$subscriptionid/providers/Microsoft.RecoveryServices/vaults?api-version=2016-06-01"
+$r = Invoke-WebRequest -Uri $vaulturi -Method GET -Headers $authHeader
+$clear = $r.Content | ConvertFrom-Json
+$Vaults = $clear.value
 $Vaults | % {
     $BareVMOnboardingRate = 0
     $VMConsumedStorage = 0
     $VMStorageRate = 0
-    Get-AzureRmRecoveryServicesVault -ResourceGroupName $_.ResourceGroupName -Name $_.Name | Set-AzureRmRecoveryServicesVaultContext
+    $clear.value.ID | % {
+        $RSVRG = $_.split("/")
+        $RSVRG = $RSVRG[4]
+    }
     # get RSV region 
     $vaultregion = $_.Location
 
     # get all VM's that are onboarded to the Vault
-    $VMs = Get-AzureRmRecoveryServicesBackupContainer -ContainerType AzureVM
-    $VMs = $VMs.FriendlyName
+    $RSV = $_.Name
+    $filter1 = "'AzureIaasVM'"
+    $filter2 = "'VM'" 
+    $VMs = 'https://management.azure.com/Subscriptions/' + $subscriptionid + '/resourceGroups/' + $RSVRG + '/providers/Microsoft.RecoveryServices/vaults/' + $RSV + '/backupProtectedItems?api-version=2017-07-01&$filter=backupManagementType eq ' + $filter1 + ' and itemType eq ' + $filter2 + ''
+    $r = Invoke-WebRequest -Uri $VMs -Method GET -Headers $authHeader
+    $clear = $r.Content | ConvertFrom-Json
 
+    $VMs = $clear.value.properties
     if ($VMs) {
         $VMs | % {
             $Result = @{ }
@@ -171,30 +218,52 @@ $Vaults | % {
             [decimal]$BareVMOnboardingRate = get-OnboardedVMprice -vaultregion $vaultregion
             [decimal]$VMStorageRate = get-VMStoragePrice -vaultregion $vaultregion -GRS $GRS
             # get resource group of vm
-            $RG = (Get-AzureRmResource -Name $_) | where ResourceType -eq "Microsoft.Compute/virtualMachines"
-            $RG = $RG.ResourceGroupName
+            $VMname = $_.friendlyname
+            $RG = $_.sourceResourceID.split("/")
+            $RG = $RG[4]
 
 
             # get total size of virtual machine
             # check if vm is running
-            $VMStatus = get-vmstatus -VMname $_ -ResourceGroupName $RG
+            $VMStatus = get-vmstatus -VMname $VMname -ResourceGroupName $RG -subscriptionId $subscriptionid -authHeader $authHeader
             if ($VMstatus -eq "online") {
-                $OSDisk = (((Get-AzureRmVM -ResourceGroupName $RG -Name $_).StorageProfile).Osdisk).DiskSizeGB
-                $DataDisk = (((Get-AzureRmVM -ResourceGroupName $RG -Name $_).StorageProfile).DataDisks).DiskSizeGB                
-
+                $vmuri = "https://management.azure.com/subscriptions/$subscriptionid/resourceGroups/$RG/providers/Microsoft.Compute/virtualMachines/" + $VMname + "?api-version=2018-06-01"
+                $r = Invoke-WebRequest -Uri $vmuri -Method GET -Headers $authHeader    
+                $clear = $r.Content | ConvertFrom-Json        
+                $OSDisk = $clear.properties.storageProfile.osDisk.diskSizeGB
+                $DataDisk = $clear.properties.storageProfile.dataDisks.DiskSizeGB
+            
                 # calculate the overall size of VM
                 $OverAllDiskSize = $OSDisk + $DataDisk
             }
             else {
-                $tmp = (Get-azurermdisk -resourcegroupname $RG | where ManagedBy -like "*$_*").DiskSizeGB
+                $vmuri = "https://management.azure.com/subscriptions/$subscriptionid/resourceGroups/$RG/providers/Microsoft.Compute/virtualMachines/" + $VMname + "?api-version=2018-06-01"
+                $r = Invoke-WebRequest -Uri $vmuri -Method GET -Headers $authHeader    
+                $VMclear = $r.Content | ConvertFrom-Json   
+                $OSdiskname = $VMclear.properties.storageProfile.osDisk.name
+                $Datadiskname = $VMclear.properties.storageProfile.dataDisk.name          
+
+                $vmuri = "https://management.azure.com/subscriptions/$subscriptionid/resourceGroups/$RG/providers/Microsoft.Compute/disks?api-version=2018-06-01"
+                $r = Invoke-WebRequest -Uri $vmuri -Method GET -Headers $authHeader
+                $clear = $r.Content | ConvertFrom-Json           
+
+                # get disk size
+                $OSDisk = ($clear.value | where name -eq "$OSdiskname").properties.diskSizeGB
+                $DataDisk = ($clear.value | where name -eq "$Datadiskname").properties.diskSizeGB
+
+                # calculate the overall size of VM
                 $OverAllDiskSize = 0
-                $tmp | % { $OverAllDiskSize += $_ }                   
+                $OverAllDiskSize = $OSDisk + $DataDisk           
+                                     
             }
             # get costcenter tag
-            $CostCenter = ((get-azurermvm -ResourceGroupName $RG -Name $_).tags | where Keys -eq "CostCenter").Values
+            $vmuri = "https://management.azure.com/subscriptions/$subscriptionid/resourceGroups/$RG/providers/Microsoft.Compute/virtualMachines/" + $VMname + "?api-version=2018-06-01"
+            $r = Invoke-WebRequest -Uri $vmuri -Method GET -Headers $authHeader    
+            $clear = $r.Content | ConvertFrom-Json 
+            $CostCenter = $clear.tags.CostCenter
 
             # get consumed RSV storage by VM
-            $VMConsumedStorage = get-VMConsumedStorage -VMName $_ -WorkspaceId $WorkspaceID
+            $VMConsumedStorage = get-VMConsumedStorage -VMName $VMname -WorkspaceId $WorkspaceID -authHeader $authHeader -Workspacename $Workspacename -subscriptionId $subscriptionid
 
             # check if VM is <= 50 GB or => 500 GB to get the accurate basic backup price
             if ($OverAllDiskSize -le 50) {
@@ -218,7 +287,7 @@ $Vaults | % {
             $OverallPrice = [math]::Round($OverallPrice, 3)
 
             $Result = @"
-[{  "VirtualMachine": "$_",
+[{  "VirtualMachine": "$VMname",
     "CostCenter": $CostCenter,
     "ConsumedStorage": $VMConsumedStorage,
     "BackupCosts($currency)": "$OverallPrice",
@@ -228,9 +297,9 @@ $Vaults | % {
             # create Hashtable 
             #$Result.Add("$_", $OverallPrice)  
             #$logMessage = ConvertTo-Json $Result
-            send-data -WorkspaceId $WorkspaceID -Workspacename $Workspacename -logMessage $Result
+            send-data -WorkspaceId $WorkspaceID -Workspacename $Workspacename -logMessage $Result -authHeader $authHeader
 
-            Write-Output "VM: $_ // Price: $OverallPrice // BarePrice: $BareVMOnboardingRate // Disksize: $OverAllDiskSize // ConsumedStorage: $VMConsumedStorage"
+            Write-Output "VM: $VMname // Price: $OverallPrice // BarePrice: $BareVMOnboardingRate // Disksize: $OverAllDiskSize // ConsumedStorage: $VMConsumedStorage"
         }
     }
     
