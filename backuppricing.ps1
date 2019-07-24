@@ -2,19 +2,19 @@
 [CmdletBinding()]
 Param(
     [Parameter(HelpMessage = 'Define target Subscription ID')]
-    [string]$subscriptionId = "ebaa7186-4182-4b95-9c1f-0b02b314174c",
+    [string]$subscriptionId,
     [Parameter(HelpMessage = 'Define target Subscriptionoffer https://azure.microsoft.com/en-us/support/legal/offer-details/')]
     [string]$subscriptionOffer = "MS-AZR-0003P",
     [Parameter(HelpMessage = 'Define the Target and Source LogAnalytics Workspace name for Azure Backup Logfiles')]
-    [string]$Workspacename = "backupla",
+    [string]$Workspacename,
     [Parameter(HelpMessage = 'Define the Target and Source LogAnalytics Workspace ID for Azure Backup Logfiles')]
-    [string]$WorkspaceID = "40019185-f7c8-4a38-a82c-841501b12432",
+    [string]$WorkspaceID,
     [Parameter(HelpMessage = 'Define your Backupstorage sku (LRS/GRS)')]
     [boolean]$GRS = $true,
     [Parameter(HelpMessage = 'Provide preferred currency')]
     [string]$currency = "EUR",
     [Parameter(Mandatory = $false, HelpMessage = '[Optional Define a SPN to get access to pricelist and Azure Subscription. If nothing selected, the MSI will be used]')]
-    [string]$ClientID="ba",
+    [string]$ClientID,
     [Parameter(Mandatory = $false)]
     [string]$ClientSecret   
 )
