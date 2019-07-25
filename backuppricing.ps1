@@ -20,6 +20,16 @@ Param(
 )
 
 if (!($ClientID)) {
+    login-azurermaccount    
+    $currentAzureContext = Get-AzureRmContext
+    $azProfile = [Microsoft.Azure.Commands.Common.Authentication.Abstractions.AzureRmProfileProvider]::Instance.Profile
+    $profileClient = New-Object Microsoft.Azure.Commands.ResourceManager.Common.RMProfileClient($azProfile)
+    $token = $profileClient.AcquireAccessToken($currentAzureContext.Subscription.TenantId)
+    $accessToken = $token.AccessToken
+    $authHeader = @{"Authorization" = "BEARER " + $accessToken } 
+    
+}
+else {
     $accessParams = @{
         ContentType = 'application/x-www-form-urlencoded'
         Headers     = @{
@@ -30,14 +40,6 @@ if (!($ClientID)) {
         URI         = $ENV:MSI_ENDPOINT + "?resource=https://management.azure.com/&api-version=2017-09-01"
     } 
     $accessToken = Invoke-RestMethod @accessParams
-}
-else {
-    $currentAzureContext = Get-AzureRmContext
-    $azProfile = [Microsoft.Azure.Commands.Common.Authentication.Abstractions.AzureRmProfileProvider]::Instance.Profile
-    $profileClient = New-Object Microsoft.Azure.Commands.ResourceManager.Common.RMProfileClient($azProfile)
-    $token = $profileClient.AcquireAccessToken($currentAzureContext.Subscription.TenantId)
-    $accessToken = $token.AccessToken
-    $authHeader = @{"Authorization" = "BEARER " + $accessToken } 
 }
 # getting all azure price information - this can take a while
 $authHeader = @{"Authorization" = "BEARER " + $accessToken } 
